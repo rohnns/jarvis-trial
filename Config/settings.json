@@ -1,0 +1,15 @@
+{
+  "root_dir": "D:/Jarvis",
+  "assistant_name": "Jarvis",
+  "wake_words": ["jarvis", "hey jarvis"],
+  "wake_word": {"threshold": 0.55},
+  "ai": {"default_provider": "ollama", "default_model": "qwen3:4b"},
+  "speech": {"whisper_model": "small", "device": "cpu", "compute_type": "int8", "command_seconds": 5.0},
+  "voice": {
+    "piper_executable": "D:/Jarvis/venv/Scripts/piper.exe",
+    "default_voice": "D:/Jarvis/Voices/en_US-lessac-medium.onnx"
+  },
+  "logging": {"level": "INFO", "file": "D:/Jarvis/Logs/jarvis.log"},
+  "ui": {"orb_fade_ms": 2500},
+  "plugins": {"enabled": ["open_app", "open_website", "google_search", "ai"]}
+}

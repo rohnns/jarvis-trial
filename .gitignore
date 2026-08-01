@@ -1,0 +1,49 @@
+# Virtual environment
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+Logs/
+*.log
+
+# Runtime
+Cache/
+Temp/
+
+# AI Models
+Models/
+Voices/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Local config
+.env
+.env.*
+
+# Audio
+*.wav
+*.mp3
+
+# Qt
+*.qm
