@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from Core.ai import OllamaProvider
 from Core.config import ConfigService
 from Core.events import EventBus
 from Core.logging_setup import configure_logging
+from Core.normalize import normalize_transcript
 from Core.paths import JarvisPaths
 from Core.plugin import PluginManager
 from Core.speech import PiperVoiceService, WakeWordService, WhisperSpeechRecognizer
@@ -64,8 +67,16 @@ class JarvisApplication:
         provider = OllamaProvider(self.settings["ai"]["default_model"])
         self.plugins = PluginManager([OpenWebsitePlugin(), GoogleSearchPlugin(), OpenAppPlugin(), AIPlugin(provider)])
         self.orb = FloatingOrb(fade_ms=int(self.settings["ui"].get("orb_fade_ms", 2500)))
-        self.tray = TrayController(self.settings["assistant_name"], on_show=self.show_orb, on_quit=self.request_shutdown)
+        self.tray = TrayController(
+            self.settings["assistant_name"],
+            on_show=self.show_orb,
+            on_quit=self.request_shutdown,
+            on_pause_toggle=self.set_manual_pause,
+            on_restart=self.request_restart,
+            on_settings=self.open_settings,
+        )
         self._command_lock = asyncio.Lock()
+        self._manually_paused = False
 
     async def start(self) -> None:
         """Start UI and background services without blocking the Qt loop."""
@@ -89,6 +100,38 @@ class JarvisApplication:
         """Schedule clean shutdown from the tray menu."""
         asyncio.create_task(self.stop())
 
+    def request_restart(self) -> None:
+        """Relaunch the assistant process and quit the current one."""
+        log.info("Restart requested from tray")
+        try:
+            subprocess.Popen([sys.executable, *sys.argv], cwd=os.getcwd())
+        except Exception:
+            log.exception("Failed to spawn restarted process")
+            return
+        self.request_shutdown()
+
+    def open_settings(self) -> None:
+        """Open the settings file with the OS default handler."""
+        settings_path = self.paths.config / "settings.json"
+        log.info("Opening settings", extra={"settings_path": str(settings_path)})
+        try:
+            os.startfile(settings_path)  # type: ignore[attr-defined]
+        except AttributeError:
+            subprocess.Popen(["notepad.exe", str(settings_path)])
+        except Exception:
+            log.exception("Failed to open settings file")
+
+    def set_manual_pause(self, paused: bool) -> None:
+        """Pause/resume wake-word listening from the tray 'Pause Listening' toggle."""
+        self._manually_paused = paused
+        if paused:
+            self.wake.suspend()
+            self.orb.set_state(OrbState.SLEEPING)
+            log.info("Listening manually paused from tray")
+        else:
+            asyncio.create_task(self.wake.resume_after_cooldown(cooldown_seconds=0.0))
+            log.info("Listening manually resumed from tray")
+
     async def wait_until_shutdown(self) -> None:
         await self.shutdown_event.wait()
 
@@ -97,10 +140,24 @@ class JarvisApplication:
             log.info("Wake ignored because a command is already active")
             return
         async with self._command_lock:
+            # The wake-word listener has already suspended itself (see
+            # WakeWordService._listen_session), so the mic is free for the
+            # entire STT -> parsing -> execution -> TTS cycle below. Resume
+            # (with cooldown) happens in the finally block regardless of
+            # outcome, unless the user manually paused listening from the tray.
             try:
                 self.orb.set_state(OrbState.LISTENING)
-                utterance = await self.recognizer.transcribe_once()
+                raw_utterance = await self.recognizer.transcribe_once()
+                if not raw_utterance:
+                    log.warning("Empty transcript received; nothing to dispatch")
+                    self.orb.set_state(OrbState.ERROR)
+                    await asyncio.sleep(1.0)
+                    self.orb.set_state(OrbState.SLEEPING)
+                    return
+                utterance = normalize_transcript(raw_utterance)
+                log.info("Transcript normalized", extra={"raw": raw_utterance, "normalized": utterance})
                 if not utterance:
+                    log.warning("Transcript normalized to empty string; nothing to dispatch")
                     self.orb.set_state(OrbState.ERROR)
                     await asyncio.sleep(1.0)
                     self.orb.set_state(OrbState.SLEEPING)
@@ -109,14 +166,24 @@ class JarvisApplication:
                 if result.message:
                     await self.voice.speak(result.message)
                 self.orb.set_state(OrbState.SLEEPING)
+                log.info(
+                    "Wake cycle completed",
+                    extra={"wake_word": wake_name, "utterance": utterance, "handled": result.handled},
+                )
             except Exception:
                 log.exception("Command handling failed")
                 self.orb.set_state(OrbState.ERROR)
                 await asyncio.sleep(2.0)
                 self.orb.set_state(OrbState.SLEEPING)
+            finally:
+                if self._manually_paused:
+                    log.info("Skipping wake-word resume because listening is manually paused")
+                else:
+                    asyncio.create_task(self.wake.resume_after_cooldown())
 
     async def handle_utterance(self, utterance: str):
         self.orb.set_state(OrbState.EXECUTING)
+        log.info("Executing command", extra={"utterance": utterance})
         result = await self.plugins.dispatch(utterance)
         self.orb.set_state(OrbState.SPEAKING if result.handled else OrbState.ERROR)
         log.info("Command handled", extra={"utterance": utterance, "handled": result.handled, "result_message": result.message})
